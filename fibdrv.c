@@ -24,8 +24,24 @@ static struct cdev *fib_cdev;
 static struct class *fib_class;
 static DEFINE_MUTEX(fib_mutex);
 
+/* recursion with cache */
+static long long fib_sequence(long long k)
+{
+    /* FIXME: use clz/ctz and fast algorithms to speed up */
+    long long f[k + 2];
+
+    f[0] = 0;
+    f[1] = 1;
+
+    for (int i = 2; i <= k; i++) {
+        f[i] = f[i - 1] + f[i - 2];
+    }
+
+    return f[k];
+}
+
 /* Calculate Fibonacci numbers by Fast Doubling */
-static long long fib_sequence(long long n)
+static long long fib_sequence_fdouble(long long n)
 {
     if (n < 2) { /* F(0) = 0, F(1) = 1 */
         return n;
@@ -73,7 +89,14 @@ static ssize_t fib_read(struct file *file,
                         size_t size,
                         loff_t *offset)
 {
-    return (ssize_t) fib_sequence(*offset);
+    switch (size) {
+    case 0:
+        return (ssize_t) fib_sequence(*offset);
+    case 1:
+        return (ssize_t) fib_sequence_fdouble(*offset);
+    default:
+        return 0;
+    }
 }
 
 /* write operation actually returns the time spent on
@@ -85,9 +108,20 @@ static ssize_t fib_write(struct file *file,
                          loff_t *offset)
 {
     ktime_t kt;
-    kt = ktime_get();
-    fib_sequence(*offset);
-    kt = ktime_sub(ktime_get(), kt);
+    switch (size) {
+    case 0:
+        kt = ktime_get();
+        fib_sequence(*offset);
+        kt = ktime_sub(ktime_get(), kt);
+        break;
+    case 1:
+        kt = ktime_get();
+        fib_sequence_fdouble(*offset);
+        kt = ktime_sub(ktime_get(), kt);
+        break;
+    default:
+        return 0;
+    }
     return (ssize_t) ktime_to_ns(kt);
 }
 
