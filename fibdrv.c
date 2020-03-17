@@ -63,13 +63,19 @@ static ssize_t fib_read(struct file *file,
     return (ssize_t) fib_sequence(*offset);
 }
 
-/* write operation is skipped */
+/* write operation actually returns the time spent on
+ * calculating the fibonacci number at given offset
+ */
 static ssize_t fib_write(struct file *file,
                          const char *buf,
                          size_t size,
                          loff_t *offset)
 {
-    return 1;
+    ktime_t kt;
+    kt = ktime_get();
+    fib_sequence(*offset);
+    kt = ktime_sub(ktime_get(), kt);
+    return (ssize_t) ktime_to_ns(kt);
 }
 
 static loff_t fib_device_lseek(struct file *file, loff_t offset, int orig)
