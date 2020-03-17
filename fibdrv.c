@@ -24,19 +24,32 @@ static struct cdev *fib_cdev;
 static struct class *fib_class;
 static DEFINE_MUTEX(fib_mutex);
 
-static long long fib_sequence(long long k)
+/* Calculate Fibonacci numbers by Fast Doubling */
+static long long fib_sequence(long long n)
 {
-    /* FIXME: use clz/ctz and fast algorithms to speed up */
-    long long f[k + 2];
-
-    f[0] = 0;
-    f[1] = 1;
-
-    for (int i = 2; i <= k; i++) {
-        f[i] = f[i - 1] + f[i - 2];
+    if (n < 2) { /* F(0) = 0, F(1) = 1 */
+        return n;
     }
+    long long f[2];
+    unsigned int ndigit = 64 - __builtin_clzll(n); /* number of digit in n */
+    f[0] = 0;                                      /* F(k) */
+    f[1] = 1;                                      /* F(k+1) */
 
-    return f[k];
+    for (int i = 0x1 << (ndigit - 1); i;
+         i >>= 1) { /* walk through the digit of n */
+        long long k1 =
+            f[0] * (f[1] * 2 - f[0]); /* F(2k) = F(k) * [ 2 * F(k+1) – F(k) ] */
+        long long k2 =
+            f[0] * f[0] + f[1] * f[1]; /* F(2k+1) = F(k)^2 + F(k+1)^2 */
+        if (n & i) {                   /* current binary digit == 1 */
+            f[0] = k2;                 /* F(n) = F(2k+1) */
+            f[1] = k1 + k2; /* F(n+1) = F(2k+2) =  F(2k) +  F(2k+1) */
+        } else {
+            f[0] = k1; /* F(n) = F(2k) */
+            f[1] = k2; /* F(n+1) = F(2k+1) */
+        }
+    }
+    return f[0];
 }
 
 static int fib_open(struct inode *inode, struct file *file)
