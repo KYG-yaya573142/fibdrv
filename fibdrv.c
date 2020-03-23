@@ -47,11 +47,11 @@ static long long fib_sequence_fdouble(long long n)
         return n;
     }
     long long f[2];
-    unsigned int ndigit = 64 - __builtin_clzll(n); /* number of digit in n */
-    f[0] = 0;                                      /* F(k) */
-    f[1] = 1;                                      /* F(k+1) */
+    unsigned int ndigit = 32 - __builtin_clz(n); /* number of digit in n */
+    f[0] = 0;                                    /* F(k) */
+    f[1] = 1;                                    /* F(k+1) */
 
-    for (int i = 0x1 << (ndigit - 1); i;
+    for (unsigned int i = 1U << (ndigit - 1); i;
          i >>= 1) { /* walk through the digit of n */
         long long k1 =
             f[0] * (f[1] * 2 - f[0]); /* F(2k) = F(k) * [ 2 * F(k+1) – F(k) ] */
