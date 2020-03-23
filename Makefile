@@ -31,9 +31,7 @@ client_plot: client_plot.c
 	$(CC) -o $@ $^
 
 plot:
-	$(MAKE) client_plot
-	sudo ./client_plot > plot_input
-	gnuplot scripts/plot.gp
+	sh do_measurement.sh > /dev/null
 
 PRINTF = env printf
 PASS_COLOR = \e[32;01m
