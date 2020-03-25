@@ -29,6 +29,7 @@ dkms.conf
 # test-oriented
 client
 client_plot
+client_statistic
 out
 
 # gnuplot input and results
