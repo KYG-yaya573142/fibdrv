@@ -9,6 +9,9 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>  // Required for the copy_to_user()
 
+#include <linux/kobject.h>  // sysfs
+#include <linux/sysfs.h>
+
 #include "bn_kernel.h"
 
 MODULE_LICENSE("Dual MIT/GPL");
@@ -22,6 +25,151 @@ MODULE_VERSION("0.1");
  * ssize_t can't fit the number > 92
  */
 #define MAX_LENGTH 300
+
+/* making our own kobject */
+struct fib_obj {
+    struct kobject kobj;
+    int n;
+};
+#define to_fib_obj(x) container_of(x, struct fib_obj, kobj)
+
+/* a custom attribute that works just for a struct fib_obj */
+struct fib_attribute {
+    struct attribute attr;
+    ssize_t (*show)(struct fib_obj *fib,
+                    struct fib_attribute *f_attr,
+                    char *buf);
+    ssize_t (*store)(struct fib_obj *fib,
+                     struct fib_attribute *f_attr,
+                     const char *buf,
+                     size_t count);
+};
+#define to_fib_attr(x) container_of(x, struct fib_attribute, attr)
+
+/*
+ * The default show/store functions to be passed to sysfs.
+ * These will be called by sysfs whenever the user read/write on the sysfs file
+ * associated with the kobjects we have registered.
+ * These functions will transpose a "default" kobject back to our custom
+ * struct fib_obj then call the "real" show/store function registered in
+ * fib_attribute.
+ */
+static ssize_t fib_attr_show(struct kobject *kobj,
+                             struct attribute *attr,
+                             char *buf)
+{
+    struct fib_obj *fib;
+    struct fib_attribute *f_attr;
+
+    fib = to_fib_obj(kobj);
+    f_attr = to_fib_attr(attr);
+    if (!f_attr->show)
+        return -EIO;
+
+    return f_attr->show(fib, f_attr, buf);
+}
+
+static ssize_t fib_attr_store(struct kobject *kobj,
+                              struct attribute *attr,
+                              const char *buf,
+                              size_t len)
+{
+    struct fib_obj *fib;
+    struct fib_attribute *f_attr;
+
+    fib = to_fib_obj(kobj);
+    f_attr = to_fib_attr(attr);
+    if (!f_attr->store)
+        return -EIO;
+
+    return f_attr->store(fib, f_attr, buf, len);
+}
+
+/* sysfs_ops for fib_ktype */
+static struct sysfs_ops fib_sysfs_ops = {
+    .show = fib_attr_show,
+    .store = fib_attr_store,
+};
+
+/* release function for fib_ktype */
+static void fib_obj_release(struct kobject *kobj)
+{
+    struct fib_obj *fib;
+
+    fib = to_fib_obj(kobj);
+    kfree(fib);
+}
+
+/*
+ * The "real" show/store functions to be registered in fib_attribute.
+ * user read to sysfs (any fib_attribute) > fib_attr_show > fib_show
+ */
+static ssize_t fib_show(struct fib_obj *fib_obj,
+                        struct fib_attribute *f_attr,
+                        char *buf)
+{
+    int retval;
+    bn *fib = bn_alloc(1);
+    bn_fib_fdoubling(fib, fib_obj->n);
+    char *p = bn_to_string(fib);
+    retval = scnprintf(buf, PAGE_SIZE, "%s\n", p);
+    bn_free(fib);
+    kfree(p);
+    return retval;
+}
+
+static ssize_t fib_store(struct fib_obj *fib,
+                         struct fib_attribute *f_attr,
+                         const char *buf,
+                         size_t count)
+{
+    int ret;
+
+    ret = kstrtoint(buf, 10, &(fib->n));
+    if (ret < 0)
+        return ret;
+
+    return count;
+}
+
+static struct fib_attribute nth = __ATTR(nth, 0664, fib_show, fib_store);
+
+/* default attribute for fib_ktype */
+static struct attribute *fib_default_attrs[] = {
+    &nth.attr, NULL, /* need to NULL terminate the list of attributes */
+};
+
+/* Define our own ktype */
+static struct kobj_type fib_ktype = {
+    .sysfs_ops = &fib_sysfs_ops,
+    .release = fib_obj_release,
+    .default_attrs = fib_default_attrs,
+};
+
+static struct kset *linux2020_kset;
+static struct fib_obj *fib_obj;
+
+/* since we are using custume kobject, a dedicated initial function is needed */
+static struct fib_obj *create_fib_obj(void)
+{
+    struct fib_obj *fib;
+    int retval;
+
+    /* allocate the memory for the whole object */
+    fib = kzalloc(sizeof(*fib), GFP_KERNEL);
+    if (!fib)
+        return NULL;
+
+    /* the kobject will be placed under the kset, no need to set a parent */
+    fib->kobj.kset = linux2020_kset;
+    retval = kobject_init_and_add(&fib->kobj, &fib_ktype, NULL, "fibdrv");
+    if (retval) {
+        kobject_put(&fib->kobj);
+        return NULL;
+    }
+    kobject_uevent(&fib->kobj, KOBJ_ADD);
+    return fib;
+}
 
 static dev_t fib_dev = 0;
 static struct cdev *fib_cdev;
@@ -102,7 +250,9 @@ static ssize_t fib_read(struct file *file,
     // printk(KERN_DEBUG "fib(%d): %s\n", (int) *offset, p);
     bn_free(fib);
     kfree(p);
-    return left;  // return number of bytes that could not be copied
+    if (left)
+        return -EFAULT;
+    return 0;
 }
 
 /* write operation actually returns the time spent on
@@ -169,6 +319,14 @@ static int __init init_fib_dev(void)
 
     mutex_init(&fib_mutex);
 
+    // stuff of sysfs registeration
+    linux2020_kset = kset_create_and_add("linux2020", NULL, kernel_kobj);
+    if (!linux2020_kset)
+        return -ENOMEM;
+    fib_obj = create_fib_obj();
+    if (!fib_obj)
+        goto failed_sysfs;
+
     // Let's register the device
     // This will dynamically allocate the major number
     rc = alloc_chrdev_region(&fib_dev, 0, 1, DEV_FIBONACCI_NAME);
@@ -215,6 +373,8 @@ failed_class_create:
     cdev_del(fib_cdev);
 failed_cdev:
     unregister_chrdev_region(fib_dev, 1);
+failed_sysfs:
+    kset_unregister(linux2020_kset);
     return rc;
 }
 
@@ -225,6 +385,8 @@ static void __exit exit_fib_dev(void)
     class_destroy(fib_class);
     cdev_del(fib_cdev);
     unregister_chrdev_region(fib_dev, 1);
+    kobject_put(&(fib_obj->kobj));
+    kset_unregister(linux2020_kset);
 }
 
 module_init(init_fib_dev);
