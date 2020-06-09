@@ -150,7 +150,7 @@ static struct kset *linux2020_kset;
 static struct fib_obj *fib_obj;
 
 /* since we are using custume kobject, a dedicated initial function is needed */
-static struct fib_obj *create_fib_obj(void)
+static struct fib_obj *create_fib_obj(const char *name)
 {
     struct fib_obj *fib;
     int retval;
@@ -162,7 +162,7 @@ static struct fib_obj *create_fib_obj(void)
 
     /* the kobject will be placed under the kset, no need to set a parent */
     fib->kobj.kset = linux2020_kset;
-    retval = kobject_init_and_add(&fib->kobj, &fib_ktype, NULL, "fibdrv");
+    retval = kobject_init_and_add(&fib->kobj, &fib_ktype, NULL, "%s", name);
     if (retval) {
         kobject_put(&fib->kobj);
         return NULL;
@@ -323,7 +323,7 @@ static int __init init_fib_dev(void)
     linux2020_kset = kset_create_and_add("linux2020", NULL, kernel_kobj);
     if (!linux2020_kset)
         return -ENOMEM;
-    fib_obj = create_fib_obj();
+    fib_obj = create_fib_obj("fibdrv");
     if (!fib_obj)
         goto failed_sysfs;
 
