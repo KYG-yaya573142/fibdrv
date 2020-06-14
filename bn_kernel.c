@@ -25,7 +25,7 @@ static int bn_clz(const bn *src)
     for (int i = src->size - 1; i >= 0; i--) {
         if (src->number[i]) {
             // prevent undefined behavior when src = 0
-            cnt += __builtin_clz(src->number[src->size - 1]);
+            cnt += __builtin_clz(src->number[i]);
             return cnt;
         } else {
             cnt += 32;
