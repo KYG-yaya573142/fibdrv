@@ -46,7 +46,7 @@ int bn_cmp(const bn *a, const bn *b);
 void bn_swap(bn *a, bn *b);
 
 /* left bit shift on bn (maximun shift 31) */
-void bn_lshift(bn *src, size_t shift);
+void bn_lshift(const bn *src, size_t shift, bn *dest);
 
 /* right bit shift on bn (maximun shift 31) */
 void bn_rshift(bn *src, size_t shift);
