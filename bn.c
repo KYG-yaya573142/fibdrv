@@ -586,6 +586,120 @@ end:
     }
 }
 
+/*
+ * consider calculating (abc)^2
+ *          a   b   c
+ *       x  a   b   c
+ *  -------------------
+ *         ac  bc  cc
+ *     ab  bb  bc
+ * aa  ab  ac
+ *
+ * instead of calculating the whole abc with n^2 steps,
+ * calculating (ab bc bc) part then double it,
+ * and finally add the (aa bb cc) part at diagonal line
+ */
+void do_sqr_base(const bn_data *a, bn_data size, bn_data *c)
+{
+    bn_data *cp = c + 1;
+    const bn_data *ap = a;
+    bn_data asize = size - 1;
+    for (int i = 0; i < asize; i++) {
+        /* calc the (ab bc bc) part */
+        cp[asize - i] = _mult_partial(&ap[i + 1], asize - i, ap[i], cp);
+        cp += 2;
+    }
+
+    /* Double it */
+    for (int i = 2 * size - 1; i > 0; i--)
+        c[i] = c[i] << 1 | c[i - 1] >> (DATA_BITS - 1);
+    c[0] <<= 1;
+
+    /* add the (aa bb cc) part at diagonal line */
+    cp = c;
+    ap = a;
+    asize = size;
+    bn_data carry = 0;
+    for (int i = 0; i < asize; i++) {
+        bn_data high, low;
+        __asm__("mulq %3" : "=a"(low), "=d"(high) : "%0"(ap[i]), "rm"(ap[i]));
+        high += (low += carry) < carry;
+        high += (cp[0] += low) < low;
+        carry = (cp[1] += high) < high;
+        cp += 2;
+    }
+}
+
+/* special version of do_mult_karatsuba */
+void do_sqr_karatsuba(const bn_data *a, bn_data size, bn_data *c)
+{
+    const int odd = size & 1;
+    const int even_size = size & ~1;
+    const int half_size = even_size / 2;
+    const bn_data *a0 = a, *a1 = a + half_size;
+    bn_data *c0 = c, *c1 = c + even_size;
+
+    /* c[0 ~ even_size-1] = a0^2, c = 1*a0^2 */
+    /* c[even_size ~ 2*even_size-1] += a1^2, c += (2^2n)*a1^2 */
+    if (half_size >= KARATSUBA_SQR_THRESHOLD) {
+        do_sqr_karatsuba(a0, half_size, c0);
+        do_sqr_karatsuba(a1, half_size, c1);
+    } else {
+        do_sqr_base(a0, half_size, c0);
+        do_sqr_base(a1, half_size, c1);
+    }
+
+    bn_data *tmp1 = (bn_data *) calloc(2 * even_size, sizeof(bn_data));
+    bn_data *tmp2 = tmp1 + even_size;
+    /* tmp = c[0 ~ even_size-1] */
+    for (int i = 0; i < even_size; i++)
+        tmp1[i] = c0[i];
+
+    bn_data carry;
+    /* c[half_size ~ half_size+even_size-1] += a1^2, c += (2^n)*a1^2 */
+    carry = _add_partial(c + half_size, c1, even_size, c + half_size);
+    /* c[half_size ~ half_size+even_size-1] += a0^2, c += (2^n)*a0^2 */
+    carry += _add_partial(c + half_size, tmp1, even_size, c + half_size);
+
+    /* (a1-a0)*(a0-a1) = -(a1-a0)^2 */
+    int cmp = bn_cmp(a1, half_size, a0, half_size);
+    if (cmp) {
+        if (cmp < 0)
+            _sub_partial(a0, a1, half_size, tmp1);
+        else
+            _sub_partial(a1, a0, half_size, tmp1);
+
+        if (half_size >= KARATSUBA_SQR_THRESHOLD)
+            do_sqr_karatsuba(tmp1, half_size, tmp2);
+        else
+            do_sqr_base(tmp1, half_size, tmp2);
+        /* c[half_size ~ half_size+even_size-1] += -(a1-a0)^2 */
+        carry -= _sub_partial(c + half_size, tmp2, even_size, c + half_size);
+    }
+    free(tmp1);
+
+    /* add carry to c[even_size+half_size ~ 2*even_size-1] */
+    if (carry) {
+        for (int i = even_size + half_size; i < even_size << 1; i++) {
+            bn_data tmp1 = c[i];
+            carry = (tmp1 += carry) < carry;
+            c[i] = tmp1;
+        }  // carry should be zero now!
+    }
+
+    if (odd) {
+        /* we have already calc a[0 ~ even_size-1]^2,
+         * now add the remaing part:
+         * a[size-1] * a[0 ~ size-2] (twice)
+         * a[size-1] * a[size-1]
+         */
+        c[even_size * 2] =
+            _mult_partial(a, even_size, a[even_size], c + even_size);
+        c[even_size * 2 + 1] =
+            _mult_partial(a, size, a[even_size], c + even_size);
+    }
+}
+
 /* c = a^2 */
 void bn_sqr(const bn *a, bn *c)
 {
@@ -602,44 +716,10 @@ void bn_sqr(const bn *a, bn *c)
         bn_resize(c, d);
     }
 
-    /* consider calculating (abc)^2
-     *          a   b   c
-     *       x  a   b   c
-     *  -------------------
-     *         ac  bc  cc
-     *     ab  bb  bc
-     * aa  ab  ac
-     *
-     * instead of calculating the whole abc with n^2 steps,
-     * calculating (ab bc bc) part then double it,
-     * and finally add the (aa bb cc) part at diagonal line
-     */
-
-    bn_data *cp = c->number + 1;
-    bn_data *ap = a->number;
-    bn_data asize = a->size - 1;
-    for (int i = 0; i < asize; i++) {
-        /* calc the (ab bc bc) part */
-        cp[asize - i] = _mult_partial(&ap[i + 1], asize - i, ap[i], cp);
-        cp += 2;
-    }
-
-    /* Double it */
-    cp = c->number;
-    for (int i = d - 1; i > 0; i--)
-        cp[i] = cp[i] << 1 | cp[i - 1] >> (DATA_BITS - 1);
-    cp[0] <<= 1;
-
-    /*  add the (aa bb cc) part at diagonal line */
-    asize = a->size;
-    bn_data carry = 0;
-    for (int i = 0; i < asize; i++) {
-        bn_data high, low;
-        __asm__("mulq %3" : "=a"(low), "=d"(high) : "%0"(ap[i]), "rm"(ap[i]));
-        high += (low += carry) < carry;
-        high += (cp[0] += low) < low;
-        carry = (cp[1] += high) < high;
-        cp += 2;
+    if (a->size < KARATSUBA_SQR_THRESHOLD) {
+        do_sqr_base(a->number, a->size, c->number);
+    } else {
+        do_sqr_karatsuba(a->number, a->size, c->number);
     }
 
     c->sign = 0;  // always positive after sqr
