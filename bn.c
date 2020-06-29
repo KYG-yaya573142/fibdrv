@@ -387,6 +387,116 @@ static bn_data _mult_partial(const bn_data *a,
     return carry;
 }
 
+/* c[asize + bsize] = a[asize] x b[bsize], make sure to cleanup c before hand */
+void do_mult_base(const bn_data *a,
+                  bn_data asize,
+                  const bn_data *b,
+                  bn_data bsize,
+                  bn_data *c)
+{
+    if (!asize || !bsize)
+        return;
+    for (int j = 0; j < bsize; j++) {
+        c[asize + j] = _mult_partial(a, asize, b[j], c + j);
+    }
+}
+
+/*
+ * Karatsuba multiplication [cf. Knuth D.E., TAOCP vol. II, sec. 4.3.3]
+ * Given 2n-bit numbers a = a1*2^n + a0 and b = b1*2^n + b0,
+ * in which a1, b1 = msb half and a0, b0 = lsb half,
+ * we can recursively compute a*b as
+ * (2^2n + 2^n)a1*b1 + (2^n)(a1-a0)(b0-b1) + (2^n + 1)a0*b0
+ */
+void do_mult_karatsuba(const bn_data *a,
+                       const bn_data *b,
+                       bn_data size,
+                       bn_data *c)
+{
+    const int odd = size & 1;
+    const int even_size = size - odd;
+    const int half_size = even_size / 2;
+
+    const bn_data *a0 = a, *a1 = a + half_size;
+    const bn_data *b0 = b, *b1 = b + half_size;
+    bn_data *c0 = c, *c1 = c + even_size;
+
+    /* c[0 ~ even_size-1] = a0*b0, c = 1*a0*b0 */
+    /* c[even_size ~ 2*even_size-1] += a1*b1, c += (2^2n)*a1*b1 */
+    if (half_size >= KARATSUBA_MUL_THRESHOLD) {
+        do_mult_karatsuba(a0, b0, half_size, c0);
+        do_mult_karatsuba(a1, b1, half_size, c1);
+    } else {
+        do_mult_base(a0, half_size, b0, half_size, c0);
+        do_mult_base(a1, half_size, b1, half_size, c1);
+    }
+
+    /* since we have to add a0*b0 and a1*b1 to
+     * c[half_size ~ half_size+even_size-1] to obtain
+     * c = (2^2n + 2^n)a1*b1 + (2^n + 1)a0*b0,
+     * we have to make a copy of either a0*b0 or a1*b1 */
+    bn_data *tmp = (bn_data *) malloc(sizeof(bn_data) * even_size);
+    for (int i = 0; i < even_size; i++)
+        tmp[i] = c0[i];
+
+    bn_data carry;
+    /* c[half_size ~ half_size+even_size-1] += a1*b1, c += (2^n)*a1*b1 */
+    carry = _add_partial(c + half_size, c1, even_size, c + half_size);
+    /* c[half_size ~ half_size+even_size-1] += a0*b0, c += (2^n)*a0*b0 */
+    carry += _add_partial(c + half_size, tmp, even_size, c + half_size);
+
+    /* calc |a1-a0| */
+    bn_data *a_tmp = tmp;
+    int prod_neg = bn_cmp(a1, half_size, a0, half_size) < 0;
+    if (prod_neg)
+        _sub_partial(a0, a1, half_size, a_tmp);
+    else
+        _sub_partial(a1, a0, half_size, a_tmp);
+
+    /* calc |b0-b1| */
+    bn_data *b_tmp = tmp + half_size;
+    if (bn_cmp(b0, half_size, b1, half_size) < 0) {
+        _sub_partial(b1, b0, half_size, b_tmp);
+        prod_neg ^= 1;
+    } else {
+        _sub_partial(b0, b1, half_size, b_tmp);
+    }
+
+    /* tmp = |a1-a0||b0-b1| */
+    tmp = (bn_data *) calloc(even_size, sizeof(bn_data));
+    if (half_size >= KARATSUBA_MUL_THRESHOLD)
+        do_mult_karatsuba(a_tmp, b_tmp, half_size, tmp);
+    else
+        do_mult_base(a_tmp, half_size, b_tmp, half_size, tmp);
+    free(a_tmp);
+
+    /* c[half_size ~ half_size+even_size-1] += or -= (a1-a0)(b0-b1) */
+    if (prod_neg)
+        carry -= _sub_partial(c + half_size, tmp, even_size, c + half_size);
+    else
+        carry += _add_partial(c + half_size, tmp, even_size, c + half_size);
+    free(tmp);
+    /* add carry to c[even_size+half_size ~ 2*even_size-1] */
+    for (int i = even_size + half_size; i < even_size << 1; i++) {
+        bn_data tmp1 = c[i];
+        carry = (tmp1 += carry) < carry;
+        c[i] = tmp1;
+    }  // carry should be zero now!
+
+    if (odd) {
+        /* we have already calc a[0 ~ even_size-1] * b[0 ~ even_size-1],
+         * now add the remaing part:
+         * a[size-1] * b[0 ~ size-2]
+         * b[size-1] * a[0 ~ size-2]
+         * a[size-1] * b[size-1]
+         */
+        c[even_size * 2] =
+            _mult_partial(a, even_size, b[even_size], c + even_size);
+        c[even_size * 2 + 1] =
+            _mult_partial(b, size, a[even_size], c + even_size);
+    }
+}
+
 /*
  * c = a x b
  * Note: work for c == a or c == b
@@ -394,27 +504,82 @@ static bn_data _mult_partial(const bn_data *a,
  */
 void bn_mult(const bn *a, const bn *b, bn *c)
 {
+    if (a->size < b->size)  // need asize > bsize
+        SWAP(a, b);
     // max digits = sizeof(a) + sizeof(b))
-    int d = a->size + b->size;
+    bn_data asize = a->size, bsize = b->size;
+    int csize = asize + bsize;
     bn *tmp;
     /* make it work properly when c == a or c == b */
     if (c == a || c == b) {
         tmp = c;  // save c
-        c = bn_alloc(d);
+        c = bn_alloc(csize);
     } else {
         tmp = NULL;
         for (int i = 0; i < c->size; i++)
             c->number[i] = 0;  // clean up c
-        bn_resize(c, d);
+        bn_resize(c, csize);
     }
 
-    for (int j = 0; j < b->size; j++) {
-        c->number[a->size + j] =
-            _mult_partial(a->number, a->size, b->number[j], c->number + j);
+    bn_data *ap = a->number;
+    bn_data *bp = b->number;
+    bn_data *cp = c->number;
+    if (b->size < KARATSUBA_MUL_THRESHOLD) {
+        do_mult_base(ap, asize, bp, bsize, cp);
+    } else {
+        do_mult_karatsuba(ap, bp, bsize, cp);
+        /* it's assumed that a and b are equally length in
+         * Karatsuba multiplication, therefore we have to
+         * deal with the remaining part after hand */
+        if (asize == bsize)
+            goto end;
+        /* we have to calc a[bsize ~ asize-1] * b */
+        cp += bsize;
+        csize -= bsize;
+        ap += bsize;
+        asize -= bsize;
+        bn_data *_tmp = NULL;
+        /* if asize = n * bsize, multiply it with same method */
+        if (asize >= bsize) {
+            _tmp = (bn_data *) calloc(2 * bsize, sizeof(bn_data));
+            do {
+                do_mult_karatsuba(ap, bp, bsize, _tmp);
+                bn_data carry;
+                carry = _add_partial(cp, _tmp, bsize * 2, cp);
+                for (int i = bsize * 2; i < csize; i++) {
+                    bn_data tmp1 = cp[i];
+                    carry = (tmp1 += carry) < carry;
+                    cp[i] = tmp1;
+                }
+                cp += bsize;
+                csize -= bsize;
+                ap += bsize;
+                asize -= bsize;
+                assert(carry == 0);
+            } while (asize >= bsize);
+        }
+        /* if asize != n * bsize, simply calculate the remaining part */
+        if (asize) {
+            if (!_tmp)
+                _tmp = (bn_data *) calloc(asize + bsize, sizeof(bn_data));
+            do_mult_base(bp, bsize, ap, asize, _tmp);
+            bn_data carry;
+            carry = _add_partial(cp, _tmp, asize + bsize, cp);
+            for (int i = asize + bsize; i < csize; i++) {
+                bn_data tmp1 = cp[i];
+                carry = (tmp1 += carry) < carry;
+                cp[i] = tmp1;
+            }
+            assert(carry == 0);
+        }
+        if (_tmp)
+            free(_tmp);
     }
+
+end:
     c->sign = a->sign ^ b->sign;
-
-    c->size = d - (c->number[d - 1] == 0);  // trim
+    if (c->size > 1 && !c->number[c->size - 1])  // trim
+        --c->size;
     if (tmp) {
         bn_swap(tmp, c);  // restore c
         bn_free(c);
