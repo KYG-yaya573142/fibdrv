@@ -204,21 +204,37 @@ void bn_rshift(const bn *src, size_t shift, bn *dest)
  * return -1 if |a| < |b|
  * return 0 if |a| = |b|
  */
-int bn_cmp(const bn *a, const bn *b)
+int bn_cmp(const bn_data *a, bn_data asize, const bn_data *b, bn_data bsize)
 {
-    if (a->size > b->size) {
+    if (asize > bsize) {
         return 1;
-    } else if (a->size < b->size) {
+    } else if (asize < bsize) {
         return -1;
     } else {
-        for (int i = a->size - 1; i >= 0; i--) {
-            if (a->number[i] > b->number[i])
+        for (int i = asize - 1; i >= 0; i--) {
+            if (a[i] > b[i])
                 return 1;
-            if (a->number[i] < b->number[i])
+            if (a[i] < b[i])
                 return -1;
         }
         return 0;
     }
+}
+
+/* c[size] = a[size] + b[size], and return the carry */
+static bn_data _add_partial(const bn_data *a,
+                            const bn_data *b,
+                            bn_data size,
+                            bn_data *c)
+{
+    bn_data carry = 0;
+    for (int i = 0; i < size; i++) {
+        bn_data tmp1 = a[i];
+        bn_data tmp2 = b[i];
+        carry = (tmp1 += carry) < carry;
+        carry += (c[i] = tmp1 + tmp2) < tmp2;
+    }
+    return carry;
 }
 
 /* |c| = |a| + |b| */
@@ -235,13 +251,8 @@ static void bn_do_add(const bn *a, const bn *b, bn *c)
     }
     c->size = asize;
 
-    bn_data carry = 0;
-    for (int i = 0; i < bsize; i++) {
-        bn_data tmp1 = a->number[i];
-        bn_data tmp2 = b->number[i];
-        carry = (tmp1 += carry) < carry;
-        carry += (c->number[i] = tmp1 + tmp2) < tmp2;
-    }
+    bn_data carry;
+    carry = _add_partial(a->number, b->number, bsize, c->number);
     if (asize != bsize) {  // deal with the remaining part if asize > bsize
         for (int i = bsize; i < asize; i++) {
             bn_data tmp1 = a->number[i];
@@ -256,6 +267,22 @@ static void bn_do_add(const bn *a, const bn *b, bn *c)
     }
 }
 
+/* c[size] = a[size] - b[size], and return the borrow */
+static bn_data _sub_partial(const bn_data *a,
+                            const bn_data *b,
+                            bn_data size,
+                            bn_data *c)
+{
+    bn_data borrow = 0;
+    for (int i = 0; i < size; i++) {
+        bn_data tmp1 = a[i];
+        bn_data tmp2 = b[i];
+        borrow = (tmp2 += borrow) < borrow;
+        borrow += (c[i] = tmp1 - tmp2) > tmp1;
+    }
+    return borrow;
+}
+
 /*
  * |c| = |a| - |b|
  * Note: |a| > |b| must be true
@@ -266,16 +293,14 @@ static void bn_do_sub(const bn *a, const bn *b, bn *c)
     int asize = a->size, bsize = b->size;
     bn_resize(c, asize);
 
-    bn_data_tmp borrow = 0;
-    for (int i = 0; i < c->size; i++) {
-        bn_data_tmp tmp1 = (i < asize) ? a->number[i] : 0;
-        bn_data_tmp tmp2 = (i < bsize) ? b->number[i] : 0;
-        tmp1 += DATA_MASK + 1;  // pre-borrow for tmp1 - tmp2
-        tmp2 += borrow;
-        borrow = tmp1 - tmp2;  // c = tmp1 - tmp2 - borrow
-        c->number[i] = borrow;
-        borrow =
-            (borrow <= DATA_MASK);  // if pre-borrowed value was actually used
+    bn_data borrow;
+    borrow = _sub_partial(a->number, b->number, bsize, c->number);
+    if (asize != bsize) {  // deal with the remaining part if asize > bsize
+        for (int i = bsize; i < asize; i++) {
+            bn_data tmp1 = a->number[i];
+            borrow = (tmp1 -= borrow) > borrow;
+            c->number[i] = tmp1;
+        }
     }
 
     while (c->size > 1 && !c->number[c->size - 1])  // trim
@@ -294,7 +319,7 @@ void bn_add(const bn *a, const bn *b, bn *c)
     } else {          // different sign
         if (a->sign)  // let a > 0, b < 0
             SWAP(a, b);
-        int cmp = bn_cmp(a, b);
+        int cmp = bn_cmp(a->number, a->size, b->number, b->size);
         if (cmp > 0) {
             /* |a| > |b| and b < 0, hence c = a - |b| */
             bn_do_sub(a, b, c);

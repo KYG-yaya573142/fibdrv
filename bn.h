@@ -40,6 +40,8 @@ typedef struct _bn {
 
 #define INIT_ALLOC_SIZE 4
 #define ALLOC_CHUNK_SIZE 4
+#define KARATSUBA_MUL_THRESHOLD 32
+#define KARATSUBA_SQR_THRESHOLD 64
 
 /*
  * output bn to decimal string
@@ -71,7 +73,7 @@ int bn_cpy(bn *dest, bn *src);
  * return -1 if |a| < |b|
  * return 0 if |a| = |b|
  */
-int bn_cmp(const bn *a, const bn *b);
+int bn_cmp(const bn_data *a, bn_data asize, const bn_data *b, bn_data bsize);
 
 /* swap the content where ptr a and b points to, NOT the ptr itself */
 void bn_swap(bn *a, bn *b);
