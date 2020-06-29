@@ -396,6 +396,70 @@ void bn_mult(const bn *a, const bn *b, bn *c)
     }
 }
 
+/* c = a^2 */
+void bn_sqr(const bn *a, bn *c)
+{
+    int d = a->size * 2;
+    bn *tmp;
+    /* make it work properly when c == a */
+    if (c == a) {
+        tmp = c;  // save c
+        c = bn_alloc(d);
+    } else {
+        tmp = NULL;
+        for (int i = 0; i < c->size; i++)
+            c->number[i] = 0;  // clean up c
+        bn_resize(c, d);
+    }
+
+    /* consider calculating (abc)^2
+     *          a   b   c
+     *       x  a   b   c
+     *  -------------------
+     *         ac  bc  cc
+     *     ab  bb  bc
+     * aa  ab  ac
+     *
+     * instead of calculating the whole abc with n^2 steps,
+     * calculating (ab bc bc) part then double it,
+     * and finally add the (aa bb cc) part at diagonal line
+     */
+
+    bn_data *cp = c->number + 1;
+    bn_data *ap = a->number;
+    bn_data asize = a->size - 1;
+    for (int i = 0; i < asize; i++) {
+        /* calc the (ab bc bc) part */
+        cp[asize - i] = _mult_partial(&ap[i + 1], asize - i, ap[i], cp);
+        cp += 2;
+    }
+
+    /* Double it */
+    cp = c->number;
+    for (int i = d - 1; i > 0; i--)
+        cp[i] = cp[i] << 1 | cp[i - 1] >> (DATA_BITS - 1);
+    cp[0] <<= 1;
+
+    /*  add the (aa bb cc) part at diagonal line */
+    asize = a->size;
+    bn_data carry = 0;
+    for (int i = 0; i < asize; i++) {
+        bn_data high, low;
+        __asm__("mulq %3" : "=a"(low), "=d"(high) : "%0"(ap[i]), "rm"(ap[i]));
+        high += (low += carry) < carry;
+        high += (cp[0] += low) < low;
+        carry = (cp[1] += high) < high;
+        cp += 2;
+    }
+
+    c->sign = 0;  // always positive after sqr
+    c->size = d - (c->number[d - 1] == 0);
+    if (tmp) {
+        bn_swap(tmp, c);  // restore c
+        bn_free(c);
+    }
+}
+
 /* calc n-th Fibonacci number and save into dest */
 void bn_fib(bn *dest, unsigned int n)
 {
@@ -443,9 +507,9 @@ void bn_fib_fdoubling(bn *dest, unsigned int n)
         bn_lshift(f1, 1, k1);  // k1 = 2 * F(k-1)
         bn_add(k1, f2, k1);    // k1 = 2 * F(k-1) + F(k)
         bn_mult(k1, f2, k2);   // k2 = k1 * f2 = F(2k)
-        bn_mult(f2, f2, k1);   // k1 = F(k)^2
+        bn_sqr(f2, k1);        // k1 = F(k)^2
         bn_swap(f2, k2);       // f2 <-> k2, f2 = F(2k) now
-        bn_mult(f1, f1, k2);   // k2 = F(k-1)^2
+        bn_sqr(f1, k2);        // k2 = F(k-1)^2
         bn_add(k2, k1, f1);    // f1 = k1 + k2 = F(2k-1) now
         if (n & i) {
             bn_swap(f1, f2);     // f1 = F(2k+1)
