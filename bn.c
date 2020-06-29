@@ -89,9 +89,11 @@ char *bn_to_string(const bn *src)
 bn *bn_alloc(size_t size)
 {
     bn *new = (bn *) malloc(sizeof(bn));
-    new->number = (unsigned int *) malloc(sizeof(int) * size);
-    memset(new->number, 0, sizeof(int) * size);
     new->size = size;
+    new->capacity = size > INIT_ALLOC_SIZE ? size : INIT_ALLOC_SIZE;
+    new->number = (unsigned int *) malloc(sizeof(int) * new->capacity);
+    for (int i = 0; i < size; i++)
+        new->number[i] = 0;
     new->sign = 0;
     return new;
 }
@@ -111,23 +113,27 @@ int bn_free(bn *src)
 
 /*
  * resize bn
+ * if size > src->size, extended space is initialized to 0
  * return 0 on success, -1 on error
- * data lose IS neglected when shinking the size
  */
 static int bn_resize(bn *src, size_t size)
 {
     if (!src)
         return -1;
+    if (size == 0)  // prevent realloc(0) = free, which will cause problem
+        size = 1;
     if (size == src->size)
         return 0;
-    if (size == 0)  // prevent realloc(0) = free, which will cause problem
-        return bn_free(src);
-    src->number = realloc(src->number, sizeof(int) * size);
-    if (!src->number) {  // realloc fails
-        return -1;
+
+    if (size > src->capacity) { /* need to actually allocate larger capacity */
+        src->capacity = (size + (ALLOC_CHUNK_SIZE - 1)) &
+                        ~(ALLOC_CHUNK_SIZE - 1);  // ceil to 4*n
+        src->number = realloc(src->number, sizeof(int) * src->capacity);
     }
-    if (size > src->size)
-        memset(src->number + src->size, 0, sizeof(int) * (size - src->size));
+    if (size > src->size) {
+        for (int i = src->size; i < size; i++)
+            src->number[i] = 0;
+    }
     src->size = size;
     return 0;
 }
@@ -219,21 +225,27 @@ int bn_cmp(const bn *a, const bn *b)
 static void bn_do_add(const bn *a, const bn *b, bn *c)
 {
     // max digits = max(sizeof(a) + sizeof(b)) + 1
-    int d = MAX(bn_msb(a), bn_msb(b)) + 1;
-    d = DIV_ROUNDUP(d, 32) + !d;
-    bn_resize(c, d);  // round up, min size = 1
+    int asize = a->size, bsize = b->size;
+    if ((asize + 1) > c->capacity) {  // only change the capacity, not the size
+        c->capacity = (asize + 1 + (ALLOC_CHUNK_SIZE - 1)) &
+                      ~(ALLOC_CHUNK_SIZE - 1);  // ceil to 4*n
+        c->number = realloc(c->number, sizeof(int) * c->capacity);
+    }
+    c->size = asize;
 
     unsigned long long int carry = 0;
     for (int i = 0; i < c->size; i++) {
-        unsigned int tmp1 = (i < a->size) ? a->number[i] : 0;
-        unsigned int tmp2 = (i < b->size) ? b->number[i] : 0;
+        unsigned int tmp1 = (i < asize) ? a->number[i] : 0;
+        unsigned int tmp2 = (i < bsize) ? b->number[i] : 0;
         carry += (unsigned long long int) tmp1 + tmp2;
         c->number[i] = carry;
         carry >>= 32;
     }
 
-    if (!c->number[c->size - 1] && c->size > 1)
-        bn_resize(c, c->size - 1);
+    if (carry) {
+        c->number[asize] = carry;
+        ++(c->size);
+    }
 }
 
 /*
@@ -243,13 +255,13 @@ static void bn_do_add(const bn *a, const bn *b, bn *c)
 static void bn_do_sub(const bn *a, const bn *b, bn *c)
 {
     // max digits = max(sizeof(a) + sizeof(b))
-    int d = MAX(a->size, b->size);
-    bn_resize(c, d);
+    int asize = a->size, bsize = b->size;
+    bn_resize(c, asize);
 
     long long int carry = 0;
     for (int i = 0; i < c->size; i++) {
-        unsigned int tmp1 = (i < a->size) ? a->number[i] : 0;
-        unsigned int tmp2 = (i < b->size) ? b->number[i] : 0;
+        unsigned int tmp1 = (i < asize) ? a->number[i] : 0;
+        unsigned int tmp2 = (i < bsize) ? b->number[i] : 0;
 
         carry = (long long int) tmp1 - tmp2 - carry;
         if (carry < 0) {
@@ -261,10 +273,8 @@ static void bn_do_sub(const bn *a, const bn *b, bn *c)
         }
     }
 
-    d = bn_clz(c) / 32;
-    if (d == c->size)
-        --d;
-    bn_resize(c, c->size - d);
+    while (c->size > 1 && !c->number[c->size - 1])  // trim
+        --c->size;
 }
 
 /*
@@ -331,8 +341,7 @@ static void bn_mult_add(bn *c, int offset, unsigned long long int x)
 void bn_mult(const bn *a, const bn *b, bn *c)
 {
     // max digits = sizeof(a) + sizeof(b))
-    int d = bn_msb(a) + bn_msb(b);
-    d = DIV_ROUNDUP(d, 32) + !d;  // round up, min size = 1
+    int d = a->size + b->size;
     bn *tmp;
     /* make it work properly when c == a or c == b */
     if (c == a || c == b) {
@@ -354,6 +363,7 @@ void bn_mult(const bn *a, const bn *b, bn *c)
     }
     c->sign = a->sign ^ b->sign;
 
+    c->size = d - (c->number[d - 1] == 0);  // trim
     if (tmp) {
         bn_swap(tmp, c);  // restore c
         bn_free(c);
