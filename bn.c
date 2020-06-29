@@ -350,7 +350,7 @@ void bn_mult(const bn *a, const bn *b, bn *c)
     c->sign = a->sign ^ b->sign;
 
     if (tmp) {
-        bn_cpy(tmp, c);  // restore c
+        bn_swap(tmp, c);  // restore c
         bn_free(c);
     }
 }
@@ -369,10 +369,10 @@ void bn_fib(bn *dest, unsigned int n)
     dest->number[0] = 1;
 
     for (unsigned int i = 1; i < n; i++) {
-        bn_cpy(b, dest);
-        bn_add(dest, a, dest);
+        bn_swap(b, dest);
+        bn_add(a, b, dest);
         bn_swap(a, b);
-    }
+    }  // dest = result
     bn_free(a);
     bn_free(b);
 }
