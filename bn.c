@@ -30,7 +30,7 @@ static int bn_clz(const bn *src)
     for (int i = src->size - 1; i >= 0; i--) {
         if (src->number[i]) {
             // prevent undefined behavior when src->number[i] = 0
-            return cnt + __builtin_clz(src->number[i]);
+            return cnt + builtin_clz(src->number[i]);
         }
         cnt += DATA_BITS;
     }
@@ -501,7 +501,7 @@ void bn_fib_fdoubling(bn *dest, unsigned int n)
     bn *k1 = bn_alloc(1);
     bn *k2 = bn_alloc(1);
 
-    for (unsigned int i = 1U << (30 - __builtin_clz(n)); i; i >>= 1) {
+    for (unsigned int i = 1U << (30 - builtin_clz(n)); i; i >>= 1) {
         /* F(2k-1) = F(k)^2 + F(k-1)^2 */
         /* F(2k) = F(k) * [ 2 * F(k-1) + F(k) ] */
         bn_lshift(f1, 1, k1);  // k1 = 2 * F(k-1)
