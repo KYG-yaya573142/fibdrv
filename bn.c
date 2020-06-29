@@ -338,6 +338,30 @@ static void bn_mult_add(bn *c, int offset, bn_data_tmp x)
     }
 }
 
+/* c[size] += a[size] * k, and return the carry */
+static bn_data _mult_partial(const bn_data *a,
+                             bn_data size,
+                             const bn_data k,
+                             bn_data *c)
+{
+    if (k == 0)
+        return 0;
+
+    bn_data carry = 0;
+    for (int i = 0; i < size; i++) {
+        bn_data high, low;
+        __asm__("mulq %3" : "=a"(low), "=d"(high) : "%0"(a[i]), "rm"(k));
+        /* the asm method is faster than using the gcc builtin __int128
+        bn_data_tmp prod = (bn_data_tmp) a[i] * k;
+        bn_data low = prod;
+        bn_data high = prod >> DATA_BITS;
+        */
+        carry = high + ((low += carry) < carry);
+        carry += ((c[i] += low) < low);
+    }
+    return carry;
+}
+
 /*
  * c = a x b
  * Note: work for c == a or c == b
@@ -359,12 +383,9 @@ void bn_mult(const bn *a, const bn *b, bn *c)
         bn_resize(c, d);
     }
 
-    for (int i = 0; i < a->size; i++) {
-        for (int j = 0; j < b->size; j++) {
-            bn_data_tmp carry = 0;
-            carry = (bn_data_tmp) a->number[i] * b->number[j];
-            bn_mult_add(c, i + j, carry);
-        }
+    for (int j = 0; j < b->size; j++) {
+        c->number[a->size + j] =
+            _mult_partial(a->number, a->size, b->number[j], c->number + j);
     }
     c->sign = a->sign ^ b->sign;
 
