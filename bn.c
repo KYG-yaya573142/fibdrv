@@ -31,9 +31,8 @@ static int bn_clz(const bn *src)
         if (src->number[i]) {
             // prevent undefined behavior when src->number[i] = 0
             return cnt + __builtin_clz(src->number[i]);
-        } else {
-            cnt += DATA_BITS;
         }
+        cnt += DATA_BITS;
     }
     return cnt;
 }
@@ -226,6 +225,8 @@ int bn_cmp(const bn *a, const bn *b)
 static void bn_do_add(const bn *a, const bn *b, bn *c)
 {
     // max digits = max(sizeof(a) + sizeof(b)) + 1
+    if (a->size < b->size)  // a->size >= b->size
+        SWAP(a, b);
     int asize = a->size, bsize = b->size;
     if ((asize + 1) > c->capacity) {  // only change the capacity, not the size
         c->capacity = (asize + 1 + (ALLOC_CHUNK_SIZE - 1)) &
@@ -234,13 +235,19 @@ static void bn_do_add(const bn *a, const bn *b, bn *c)
     }
     c->size = asize;
 
-    bn_data_tmp carry = 0;
-    for (int i = 0; i < c->size; i++) {
-        bn_data tmp1 = (i < asize) ? a->number[i] : 0;
-        bn_data tmp2 = (i < bsize) ? b->number[i] : 0;
-        carry += (bn_data_tmp) tmp1 + tmp2;
-        c->number[i] = carry;
-        carry >>= DATA_BITS;
+    bn_data carry = 0;
+    for (int i = 0; i < bsize; i++) {
+        bn_data tmp1 = a->number[i];
+        bn_data tmp2 = b->number[i];
+        carry = (tmp1 += carry) < carry;
+        carry += (c->number[i] = tmp1 + tmp2) < tmp2;
+    }
+    if (asize != bsize) {  // deal with the remaining part if asize > bsize
+        for (int i = bsize; i < asize; i++) {
+            bn_data tmp1 = a->number[i];
+            carry = (tmp1 += carry) < carry;
+            c->number[i] = tmp1;
+        }
     }
 
     if (carry) {
